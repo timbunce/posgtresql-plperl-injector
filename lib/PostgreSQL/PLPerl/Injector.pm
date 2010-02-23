@@ -8,10 +8,10 @@ PostgreSQL::PLPerl::Injector - Inject subs and code into the PostgreSQL plperl l
 
     use PostgreSQL::PLPerl::Injector;
 
-    inject_plperl_with_sub($subroutine_name);
+    inject_plperl_with_name($name);
 
     inject_plperl_with_code($perl_code, $allowed_opcodes, $load_dependencies);
-    inject_plperl_with_code('use Foo qw(bar)', 'caller,tied'', 0);
+    inject_plperl_with_code('use Foo qw(bar)', 'caller,tied', 0);
 
 =head1 DESCRIPTION
 
@@ -84,16 +84,75 @@ use strict;
 use warnings;
 use Exporter;
 use Carp;
+use Safe;
 
 our @ISA = qw(Exporter);
 our @EXPORT = qw(
-    inject_plperl_with_sub
+    inject_plperl_with_name
     inject_plperl_with_code
 );
 
 our $debug = 0;
 
+my %requested_subs;
+my @requested_code;
 
+sub inject_plperl_with_name {
+    my ($name) = @_;
+    # XXX sanity check
+    # warn if not a defined sub
+    $requested_subs{$name}++;
+}
+
+sub inject_plperl_with_code {
+    my ($code, $ops) = @_;
+    # XXX sanity check ops
+    push @requested_code, [ $code, $ops ];
+}
+
+
+# PostgreSQL 8.x:
+# plperl only calls share() (and thus share_from) once during setup
+# and after the opmask has been established.
+# So we can use share_from() as a useful hook point.
+
+my $orig_share_from = \&Safe::share_from;
+do {
+    my $hooked_share_from = sub {
+        my $safe = shift;
+        _inject($safe)
+            if $safe->{Root} eq 'PLPerl' # PostgreSQL 8.x
+            or $safe->{Root} eq 'PostgreSQL::InServer::safe_container';
+        return $safe->$orig_share_from(@_);
+    };
+
+    no warnings qw(redefine);
+    *Safe::share_from = $hooked_share_from;
+};
+
+
+sub _inject {
+    my ($safe) = @_;
+
+    # just once per container
+    return if $safe->{__plperl_injector__}++;
+
+    eval {
+
+        # inject subs first, so injected code can call them
+        $safe->$orig_share_from('main', [ keys %requested_subs ]);
+
+        _inject_code($safe, @$_) for @requested_code;
+
+    };
+    warn __PACKAGE__." error: $@" if $@;
+}
+
+
+sub _inject_code {
+    my ($safe, $code, $ops) = @_;
+
+}
 
 
 # vim: ts=8:sw=4:sts=4:et
