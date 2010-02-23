@@ -8,7 +8,7 @@ PostgreSQL::PLPerl::Injector - Inject subs and code into the PostgreSQL plperl l
 
     use PostgreSQL::PLPerl::Injector;
 
-    inject_plperl_with_name($name);
+    inject_plperl_with_names($name);
 
     inject_plperl_with_code($perl_code, $allowed_opcodes, $load_dependencies);
     inject_plperl_with_code('use Foo qw(bar)', 'caller,tied', 0);
@@ -88,20 +88,21 @@ use Safe;
 
 our @ISA = qw(Exporter);
 our @EXPORT = qw(
-    inject_plperl_with_name
+    inject_plperl_with_names
     inject_plperl_with_code
 );
 
 our $debug = 0;
 
-my %requested_subs;
+my %requested_names;
 my @requested_code;
 
-sub inject_plperl_with_name {
+sub inject_plperl_with_names {
     my ($name) = @_;
+    my @names = (ref $name) ? @$name : ($name);
     # XXX sanity check
-    # warn if not a defined sub
-    $requested_subs{$name}++;
+    # warn if not a defined sub?
+    $requested_names{$_}++ for @names;
 }
 
 sub inject_plperl_with_code {
@@ -118,11 +119,14 @@ sub inject_plperl_with_code {
 
 my $orig_share_from = \&Safe::share_from;
 do {
+
     my $hooked_share_from = sub {
         my $safe = shift;
+
         _inject($safe)
             if $safe->{Root} eq 'PLPerl' # PostgreSQL 8.x
             or $safe->{Root} eq 'PostgreSQL::InServer::safe_container';
+
         return $safe->$orig_share_from(@_);
     };
 
@@ -140,9 +144,14 @@ sub _inject {
     eval {
 
         # inject subs first, so injected code can call them
-        $safe->$orig_share_from('main', [ keys %requested_subs ]);
+        my @names = keys %requested_names;
+        warn "Sharing with plperl: @names\n";
+        $safe->$orig_share_from('main', \@names);
 
-        _inject_code($safe, @$_) for @requested_code;
+        for my $code (@requested_code) {
+            warn "Executing in plperl: $code\n";
+            _inject_code($safe, @$code);
+        }
 
     };
     warn __PACKAGE__." error: $@" if $@;
