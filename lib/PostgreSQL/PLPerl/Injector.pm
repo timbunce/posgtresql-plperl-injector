@@ -10,7 +10,12 @@ PostgreSQL::PLPerl::Injector - Inject subs and code into the PostgreSQL plperl l
 
     inject_plperl_with_names(@names);
 
-    inject_plperl_with_code($perl_code, $allowed_opcodes, $load_dependencies);
+XXX loading entire modules into Safe seems frought with problems
+XXX and isn't currently recommended. Your mileage may vary.
+
+    inject_plperl_with_module($module_name, $imports, $allowed_opcodes);
+
+    inject_plperl_with_code($perl_code, $allowed_opcodes);
 
 =head1 DESCRIPTION
 
@@ -67,7 +72,7 @@ For example:
     use MIME::Base64 qw(encode_base64 decode_base64);
 
     # share the names with the main plperl namespace
-    inject_plperl_with_names(qw(decode_base64 decode_base64))
+    inject_plperl_with_names(qw(encode_base64 decode_base64))
 
 Perl subroutines and variables that exist in a package namespace, i.e., non
 not lexicals, can be 'shared' with plperl using L</inject_plperl_with_names>.
@@ -126,12 +131,43 @@ variables as code compiled inside plperl. This may cause subtle bugs.
 This function provides an alternative approach for making external code
 available to plperl. Instead of loading code outside of plperl and then sharing
 individual subroutines via L</inject_plperl_with_names>, using
-L</inject_plperl_with_code> you can load entire modules into plperl.
+L</inject_plperl_with_code> you can load entire modules into plperl
+or just execute arbitrary fragments of perl code:
+
+    inject_plperl_with_code('sub foo { ... }');
+
+=head3 Opcodes
 
 The plperl language uses L<Safe> to restrict what operations (perl I<opcodes>)
-can be compiled. For example, file operations like C<open()> are not allowed.
+can be compiled. For example, some introspection operators like C<caller()> and
+all file operations like C<open()> are not allowed. C<inject_plperl_with_code()>
+honours those restrictions by default.
 
-    inject_plperl_with_code('use Foo qw(bar)', 'caller,tied', 0);
+In order to execute $perl_code it's likely that you'll need to relax the
+restrictions to allow specific opcodes (or named groups of opcodes called
+optags). You can do that by listing them in $allowed_opcodes, separated by
+commas. Remember that I<any opcodes you allow create a potential risk> if
+hostile plperl could execute the subs that use those opcodes.
+
+but allows you to relax the them 
+
+    inject_plperl_with_code(
+        q{ use MIME::Base64 qw(encode_base64 decode_base64) },
+        'require,caller,tied',
+        allow_nested_load => 1
+    );
+
+
+    # For old perls we add entereval if entertry is listed
+    # due to http://rt.perl.org/rt3/Ticket/Display.html?id=70970
+    # Testing with a recent perl (>=5.11.4) ensures this doesn't
+    # allow any use of actual entereval (eval "...") opcodes.
+
+=head3 Nested use/require
+
+XXX
+
+=head3 Other issues
 
 Refer to L</Sort Bug> affecting code loaded inside the compartment.
 
@@ -158,10 +194,20 @@ package-by-package basis, something like this:
 
 If so it might be worth adding a new function: inject_plperl_sort_fix('Foo');
 
+A better fix is to compile postgres to use a perl that was configured with
+multiplicity but not threads (Configure -Uusethreads -Dusemultiplicity).
+That'll not only fix the sort bug but also give you a significant boost in the
+performance of your perl code.
+
 =head1 LIMITATIONS
 
 You can't share %_SHARED between plperl and plperlu languages because the
 languages execute in two separate instances of the Perl interpreter.
+
+    # For old perls we add entereval if entertry is listed
+    # due to http://rt.perl.org/rt3/Ticket/Display.html?id=70970
+    # Testing with a recent perl (>=5.11.4) ensures this doesn't
+    # allow any use of actual entereval (eval "...") opcodes.
 
 =head1 AUTHOR
 
@@ -187,6 +233,7 @@ use Safe;
 our @ISA = qw(Exporter);
 our @EXPORT = qw(
     inject_plperl_with_names
+    inject_plperl_with_module
     inject_plperl_with_code
 );
 
@@ -194,6 +241,8 @@ our $debug = 0;
 
 my %requested_names;
 my @requested_code;
+my @requested_module;
+
 
 sub inject_plperl_with_names {
     my @names = @_;
@@ -202,12 +251,22 @@ sub inject_plperl_with_names {
     $requested_names{$_}++ for @names;
 }
 
+sub inject_plperl_with_module {
+    my ($module, $imports, $ops) = @_;
+    # XXX sanity check
+    push @requested_module, [ $module, $imports, $ops ];
+}
+
 sub inject_plperl_with_code {
     my ($code, $ops) = @_;
     # XXX sanity check ops
     push @requested_code, [ $code, $ops ];
 }
 
+
+sub _warn {
+    print STDERR "@_\n";
+}
 
 # PostgreSQL 8.x:
 # plperl only calls share() (and thus share_from) once during setup
@@ -235,30 +294,98 @@ do {
 sub _inject {
     my ($safe) = @_;
 
+#delete $SIG{__DIE__}; # XXX
+
     # just once per container
     return if $safe->{__plperl_injector__}++;
 
     eval {
 
-        # inject subs first, so injected code can call them
+        # inject subs before code, so injected code can call them
         my @names = keys %requested_names;
-        warn "Sharing with plperl: @names\n" if @names;
+        _warn "Sharing with plperl: @names\n" if @names;
         $safe->$orig_share_from('main', \@names);
 
-        for my $code (@requested_code) {
-            warn "Executing in plperl: $code\n";
-            _inject_code($safe, @$code);
+        # inject modules
+        for my $module_args (@requested_module) {
+            my ($module, $imports, $ops) = @$module_args;
+            _inject_module($safe, $module, $imports, $ops);
+        }
+
+        # inject code
+        for my $code_args (@requested_code) {
+            my ($code, $ops, $allow_use) = @$code_args;
+            _inject_code($safe, $code, $ops, $allow_use);
         }
 
     };
-    warn __PACKAGE__." error: $@" if $@;
+    die __PACKAGE__." error: $@\n" if $@;
+}
+
+
+sub _inject_module {
+    my ($safe, $module, $imports, $ops) = @_;
+
+    $ops .= ',require';
+
+    require DynaLoader;
+    require XSLoader;
+    my $xsl_entry = 'XSLoader::load';
+
+    # share dynaloader and xsloader
+    # load the module
+    # unshare them
+    $safe->share_from('main', [ $xsl_entry ]);
+
+    $safe->reval(q{ $INC{'XSLoader.pm'} = 'injected' });
+
+    my $use = sprintf "use %s %s", $module,
+        ($imports && @$imports) ? "qw(@$imports)" : "";
+    _warn "inject module: $use\n";
+    eval { _inject_code($safe, $use, $ops) };
+    die $@ if $@;
+
+    *{ $safe->varglob($xsl_entry) } = sub {
+        die "$xsl_entry not available within plperl";
+    };
+
+
 }
 
 
 sub _inject_code {
-    my ($safe, $code, $ops) = @_;
+    my ($safe, $code, $ops, $allow_use) = @_;
+    $ops ||= '';
 
+    # For old perls we add entereval if entertry is listed
+    # due to http://rt.perl.org/rt3/Ticket/Display.html?id=70970
+    # Testing with a recent perl (>=5.11.4) ensures this doesn't
+    # allow any use of actual entereval (eval "...") opcodes.
+    $ops = "entereval,$ops"
+        if $] < 5.011004 and $ops =~ /\bentertry\b/;
+
+    _warn(sprintf "Executing in plperl: %s%s%s\n",
+        $code,
+        $ops ? ". Extra ops '$ops'" : "",
+        $allow_use ? '. Nested use allowed' : "");
+
+    # XXX disallow use unless $allow_use
+
+    my $mask = $safe->mask;
+
+    # relax, eval, restrict, propagate
+    $safe->permit(split /\s*,\s*/, $ops) if $ops;
+
+    my $ok = $safe->reval("$code; 1");
+    $safe->mask($mask);
+    if (not $ok) {
+        chomp $@;
+        $@ =~ s/\.$//;
+        die "$@ (while executing $code)\n";
+    }
+    _warn "Done executing in plperl.\n\n";
 }
+
 
 
 # vim: ts=8:sw=4:sts=4:et
