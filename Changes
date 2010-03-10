@@ -2,9 +2,9 @@
 
 Changes - List of significant changes to PostgreSQL::PLPerl::Injector
 
-=head2 Changes in 1.001
+=head2 Changes in 1.002
 
-  Initial version.
+  Initial release.
 
 =cut
 
