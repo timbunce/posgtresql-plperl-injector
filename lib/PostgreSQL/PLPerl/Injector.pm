@@ -48,15 +48,28 @@ PostgreSQL initializes a Perl interpreter.
 
 =head2 PostgreSQL 8.x
 
-XXX talk about loading via PERL5OPT env var
-Note that PERL5OPT env var code should unset PERL5OPT to avoid problems with
-nested perl invocation (by pg_ctl or plperlu code etc.).
+Set the C<PERL5OPT> before starting postgres, to something like this:
+
+    PERL5OPT='-e "require q{plperlinit.pl}"'
+
+and create a F<plperlinit.pl> file in the same directory as your
+F<postgres.conf> file.
+
+In the F<plperlinit.pl> file write the code to load this module, plus any
+others you want to load and share subroutines from. (After reading and
+considering the risks outlined in L</WARNINGS>.)
+
+The code in the F<plperlinit.pl> should also include C<delete $ENV{PERL5OPT};>
+to avoid any problems with nested invocation of perl, perhaps via a C<plperlu>
+function.
 
 =head2 PostgreSQL 9.0
 
 For PostgreSQL 9.0 you can still use the C<PERL5OPT> method described above.
-Alternatively you can use the C<plperl.on_init> configuration variable in the
-F<postgres.conf> file.
+Alternatively, and preferably, you can use the C<plperl.on_init> configuration
+variable in the F<postgres.conf> file.
+
+    plperl.on_init='require q{plperlinit.pl};'
 
 =head1 SHARING SUBROUTINES
 
