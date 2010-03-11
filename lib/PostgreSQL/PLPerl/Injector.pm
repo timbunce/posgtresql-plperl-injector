@@ -46,18 +46,18 @@ If you don't trust your users you should not use this module.
 In order to use this module you need to arrange for it to be loaded when
 PostgreSQL initializes a Perl interpreter.
 
+Create a F<plperlinit.pl> file in the same directory as your
+F<postgres.conf> file, if it doesn't exist already.
+
+In the F<plperlinit.pl> file write the code to load this module, plus any
+others you want to load and share subroutines from. (After reading and
+considering the risks outlined in L</WARNINGS>.)
+
 =head2 PostgreSQL 8.x
 
 Set the C<PERL5OPT> before starting postgres, to something like this:
 
     PERL5OPT='-e "require q{plperlinit.pl}"'
-
-and create a F<plperlinit.pl> file in the same directory as your
-F<postgres.conf> file.
-
-In the F<plperlinit.pl> file write the code to load this module, plus any
-others you want to load and share subroutines from. (After reading and
-considering the risks outlined in L</WARNINGS>.)
 
 The code in the F<plperlinit.pl> should also include C<delete $ENV{PERL5OPT};>
 to avoid any problems with nested invocation of perl, perhaps via a C<plperlu>
@@ -96,7 +96,7 @@ that refers to the corresponding item on the outside.
 
 For example:
 
-    inject_plperl_with_names(MIME::Base64 => qw(encode_base64 decode_base64))
+    inject_plperl_with_names_from(MIME::Base64 => qw(encode_base64 decode_base64))
 
 This is a convenience function that loads the specified module, imports the
 names into the callers namespace (for the convenience of the plperlu language)
